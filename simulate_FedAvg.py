@@ -53,20 +53,14 @@ if __name__ == "__main__":
             clients.append(Client(i, CNN(), train_dataset, idxs, device))
 
     # Initialize the server
-    server = Server(global_model, device)
+    server = Server(clients, global_model, device)
 
     # Simulate federated learning rounds
     print("Starting federated learning simulation...")
     start_time = time.time()
     for r in range(rounds):
-        client_weights = []
-        for client in clients:
-            client.model.load_state_dict(server.global_model.state_dict())
-            weights = client.train(epochs=1)
-            client_weights.append(weights)
-
-        server.aggregate(client_weights)
-        print(f"Round {r+1} complete")
+        server.run_round_of_training()
+        print(f"Round {r+1} completed")
     end_time = time.time()
     print(f"Federated learning simulation completed in {end_time - start_time:.2f} seconds")
 
