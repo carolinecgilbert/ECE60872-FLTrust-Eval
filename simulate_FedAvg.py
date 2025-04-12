@@ -1,4 +1,4 @@
-from client import Client, MaliciousClient
+from client import *
 from server import Server
 from dataset import MNISTDataset
 from model import CNN
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     clients = []
     for i, idxs in enumerate(client_indices):
         if i < num_malicious:
-            clients.append(MaliciousClient(i, CNN(), train_dataset, idxs, device))
+            clients.append(SignFlipping(i, CNN(), train_dataset, idxs, device))
         else:
             clients.append(Client(i, CNN(), train_dataset, idxs, device))
 
