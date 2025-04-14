@@ -40,6 +40,47 @@ class Client:
             model_update_norm += torch.norm(diff).item() ** 2
         return model_update_norm ** 0.5
 
+class LabelFlipping:
+    """
+    Simulation of a client in a federated learning.
+    Each client has its own model, dataset, train function.
+    """
+    def __init__(self, client_id, model, dataset, indices, device):
+        self.id = client_id
+        self.device = device
+        self.model = model.to(self.device)
+        self.train_data = DataLoader(Subset(dataset, indices), batch_size=32, shuffle=True)
+        #                            {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+        self.labelmap = torch.tensor([8, 1, 5, 8, 1, 5, 8, 1, 8, 8])
+
+    def train(self, epochs=1, lr=0.01):
+        self.model.train()
+
+        # Save initial weights
+        initial_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        self.labelmap = self.labelmap.to(self.device)
+
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=lr)
+        for _ in range(epochs):
+            for x, y in self.train_data:
+                x, y = x.to(self.device), y.to(self.device)
+                optimizer.zero_grad()
+                output = self.model(x)
+                y = self.labelmap[y]
+                loss = F.cross_entropy(output, y)
+                loss.backward()
+                optimizer.step()
+
+        print(f"Label flipping model update norm: {self.model_update_norm(initial_state, self.model.state_dict())}") 
+
+        return self.model.state_dict()
+    
+    def model_update_norm(self, model_i, model_f):
+        model_update_norm = 0 
+        for k in model_f.keys():
+            diff = model_f[k] - model_i[k]
+            model_update_norm += torch.norm(diff).item() ** 2
+        return model_update_norm ** 0.5
 
 # Performs gradient ascent
 # Gradient and model updates are normalized to prevent NaN values from appearing
