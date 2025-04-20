@@ -2,6 +2,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 
+import random
+
 class Client:
     """
     Simulation of a client in a federated learning.
@@ -40,18 +42,86 @@ class Client:
             model_update_norm += torch.norm(diff).item() ** 2
         return model_update_norm ** 0.5
 
-class LabelFlipping:
-    """
-    Simulation of a client in a federated learning.
-    Each client has its own model, dataset, train function.
-    """
-    def __init__(self, client_id, model, dataset, indices, device):
-        self.id = client_id
-        self.device = device
-        self.model = model.to(self.device)
-        self.train_data = DataLoader(Subset(dataset, indices), batch_size=32, shuffle=True)
-        #                            {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
-        self.labelmap = torch.tensor([8, 1, 5, 8, 1, 5, 8, 1, 8, 8])
+class Backdoor(Client):
+
+    def __init__(self, client_id, model, dataset, indices, device, trigger_pattern = [[-.42, -.42, -.42, -.42, -.42], 
+                                                                                      [-.42, 2.80, 2.80, 2.80, -.42], 
+                                                                                      [-.42, 2.80, -.42, 2.80, -.42], 
+                                                                                      [-.42, 2.80, -.42, 2.80, -.42], 
+                                                                                      [-.42, 2.80, 2.80, 2.80, -.42], 
+                                                                                      [-.42, -.42, -.42, -.42, -.42]], trigger_output = 0):
+        super().__init__(client_id, model, dataset, indices, device)
+
+        self.trigger_pattern = torch.tensor(trigger_pattern)    # Pattern that triggers the backdoor
+        self.trigger_output = torch.tensor(trigger_output)      # Label model should flip to when pattern exists in the input image
+
+    @staticmethod
+    def add_trigger(tensor, trigger, random_offset = False):
+
+        # print(f"Tensor shape: {tensor.shape}, trigger shape: {trigger.shape}")
+
+        trigger_h, trigger_w = trigger.shape
+        tensor_h, tensor_w = tensor.shape
+
+        if (random_offset):
+            h_off = random.randint(0, tensor_h - trigger_h)
+            w_off = random.randint(0, tensor_w - trigger_w)
+        else:
+            h_off = 0
+            w_off = 0
+
+        tensor[h_off:h_off+trigger_h, w_off:w_off+trigger_w] = trigger
+
+        return tensor
+
+    # Consider training once per iteration (Either with backdoor or without. Not both)
+    def train(self, epochs=1, lr=0.01):
+        self.model.train()
+
+        # Save initial weights
+        initial_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        
+        self.trigger_output = self.trigger_output.to(self.device)
+
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=lr)
+        for _ in range(epochs):
+            for x, y in self.train_data:
+
+                # Create backdoor input images
+                x_bt = x.detach().clone()
+                for image in x_bt:
+                    image[0] = Backdoor.add_trigger(image[0], self.trigger_pattern)
+
+                x, x_bt, y = x.to(self.device), x_bt.to(self.device), y.to(self.device)
+                optimizer.zero_grad()
+
+                # Train with backdoor
+                output = self.model(x_bt)
+                loss = F.cross_entropy(output, torch.full_like(y, self.trigger_output))
+                loss.backward()
+                optimizer.step()
+
+                # Train normally
+                output = self.model(x)
+                loss = F.cross_entropy(output, y)
+                loss.backward()
+                optimizer.step()
+
+                
+
+
+
+        print(f"Backdoor update norm: {self.model_update_norm(initial_state, self.model.state_dict())}") 
+
+        return self.model.state_dict()
+
+
+class LabelFlipping(Client):
+    #                                                                         {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+    def __init__(self, client_id, model, dataset, indices, device, labelmap = [8, 1, 5, 8, 1, 5, 8, 1, 8, 8]):
+        super().__init__(client_id, model, dataset, indices, device)
+        
+        self.labelmap = torch.tensor(labelmap)
 
     def train(self, epochs=1, lr=0.01):
         self.model.train()
