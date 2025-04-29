@@ -31,16 +31,17 @@ class Client:
                 loss.backward()
                 optimizer.step()
 
-        print(f"Honest model update norm: {self.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"Honest model update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
     
-    def model_update_norm(self, model_i, model_f):
-        model_update_norm = 0 
+    @staticmethod
+    def model_update_norm(model_i, model_f):
+        norm = 0 
         for k in model_f.keys():
             diff = model_f[k] - model_i[k]
-            model_update_norm += torch.norm(diff).item() ** 2
-        return model_update_norm ** 0.5
+            norm += torch.norm(diff).item() ** 2
+        return norm ** 0.5
 
 class Backdoor(Client):
 
@@ -111,7 +112,7 @@ class Backdoor(Client):
 
 
 
-        print(f"Backdoor update norm: {self.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"Backdoor update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
 
@@ -141,7 +142,7 @@ class LabelFlipping(Client):
                 loss.backward()
                 optimizer.step()
 
-        print(f"Label flipping model update norm: {self.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"Label flipping model update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
     
@@ -178,7 +179,7 @@ class GradientAscent(Client):
 
         # Calculate model update norm: 
         honest_state = self.model.state_dict()
-        honest_update_norm = self.model_update_norm(initial_state, honest_state)
+        honest_update_norm = Client.model_update_norm(initial_state, honest_state)
         
         # If trained honest model has nan, break out of here
         for k in honest_state.keys():
@@ -213,7 +214,7 @@ class GradientAscent(Client):
                 optimizer.step()
 
         # --- Normalize model updates --- #
-        mal_update_norm = self.model_update_norm(initial_state, self.model.state_dict())
+        mal_update_norm = Client.model_update_norm(initial_state, self.model.state_dict())
         scale = honest_update_norm / mal_update_norm
         # Return honest update if gradient ascent results in nan parameter values
         if (torch.isnan(torch.tensor(scale))): 
@@ -233,7 +234,7 @@ class GradientAscent(Client):
                 if (torch.isnan(mal_state[k]).any()):
                     return honest_state
                 
-        print(f"GradientAscent model update norm: {self.model_update_norm(initial_state, mal_state)}") 
+        print(f"GradientAscent model update norm: {Client.model_update_norm(initial_state, mal_state)}") 
                     
         return mal_state
 
@@ -267,7 +268,7 @@ class GradientAscentNoScale(Client):
 
                 optimizer.step()
 
-        print(f"GradientAscent model update norm: {self.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"GradientAscent model update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
         
         return self.model.state_dict()
 
@@ -298,7 +299,7 @@ class SignFlipping(Client):
             delta = self.model.state_dict()[k] - initial_state[k]
             flipped_state[k] = initial_state[k] - delta 
 
-        print(f"SignFlipping model update norm: {self.model_update_norm(initial_state, flipped_state)}") 
+        print(f"SignFlipping model update norm: {Client.model_update_norm(initial_state, flipped_state)}") 
 
         return flipped_state
 
