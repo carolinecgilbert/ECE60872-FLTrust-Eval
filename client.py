@@ -1,4 +1,5 @@
 import torch
+import math
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 
@@ -31,17 +32,99 @@ class Client:
                 loss.backward()
                 optimizer.step()
 
-        print(f"Honest model update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"Honest model update norm: {Client.state_dict_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
     
+    # Takes a initial model state_dict and the model state_dict after an update. Calculates the magnitude of the update. 
     @staticmethod
-    def model_update_norm(model_i, model_f):
+    def state_dict_update_norm(model_i, model_f):
         norm = 0 
         for k in model_f.keys():
             diff = model_f[k] - model_i[k]
             norm += torch.norm(diff).item() ** 2
         return norm ** 0.5
+        
+    @staticmethod
+    def state_dict_norm(model):
+        norm = 0
+        for k in model.keys():
+            norm += torch.norm(model[k]).item() ** 2
+        return norm ** 0.5
+    
+    @staticmethod
+    def state_dict_normalize(model_i, model_f, norm):
+        if (model_i is not None):
+            update = {k: model_f[k] - model_i[k] for k in model_f.keys()}
+
+            update_norm = Client.state_dict_update_norm(model_i, model_f)
+            scale = norm / update_norm
+            
+            model_n = {}
+            for k in update.keys():
+                update[k].mul_(scale)
+                model_n[k] = model_i[k] + update[k]
+        else:
+            update_norm = Client.state_dict_norm(model_f)
+            scale = norm / update_norm
+            
+            model_n = {k: v.clone() for k, v in model_f.items()}
+            for k in model_n.keys():
+                model_n[k].mul_(scale)
+
+        return (model_n, scale)
+        
+    
+    @staticmethod
+    def state_dict_cosine_sim(model_u, model_x):
+        u_vector = torch.cat([v.flatten() for v in model_u.values()])
+        x_vector = torch.cat([v.flatten() for v in model_x.values()])
+
+        # Compute cosine similarity
+        return F.cosine_similarity(u_vector.unsqueeze(0), x_vector.unsqueeze(0)).item()
+    
+    @staticmethod
+    def state_dict_dot_product(model_u, model_x):
+        # Flatten and concatenate all tensors
+        u_vector = torch.cat([v.flatten() for v in model_u.values()])
+        x_vector = torch.cat([v.flatten() for v in model_x.values()])
+
+        # Compute dot product
+        dot_product = torch.dot(u_vector, x_vector).item()
+
+        return dot_product
+    
+    # Returns model with updates at the given angle from model_u. Uses model_x to generate a orthogonal model
+    @staticmethod
+    def state_dict_rotate(init_model, model_u, model_x, angle):
+        # Compute model updates for module u and module x
+        u_update = {k: model_u[k] - init_model[k] for k in model_u.keys()}
+        x_update = {k: model_x[k] - init_model[k] for k in model_x.keys()}
+        u_update_norm = Client.state_dict_norm(u_update)
+
+        # u.x / u.u
+        scale = Client.state_dict_dot_product(u_update, x_update) / Client.state_dict_dot_product(u_update, u_update)
+
+        # Scale u update to get the projection of x onto u. 
+        model_p = {k: v.clone() for k, v in u_update.items()}
+        for k in model_p.keys():
+            model_p[k].mul_(scale)
+        (model_pn, _) = Client.state_dict_normalize(None, model_p, u_update_norm)
+
+        # Subtract projection from x to get the orthogonal projection
+        model_o = {}
+        for k in model_p.keys():
+            model_o[k] = x_update[k] - model_p[k]
+        (model_on, _) = Client.state_dict_normalize(None, model_o, u_update_norm)
+
+
+        # Combine parallel and orthogonal vectors to reach given angle from model_u
+        rotated_update = {}
+        for k in u_update.keys():
+            rotated_update[k] = init_model[k] + model_pn[k].mul_(math.cos(angle)) + model_on[k].mul_(math.sin(angle))
+
+        return rotated_update
+
 
 class Backdoor(Client):
 
@@ -108,11 +191,7 @@ class Backdoor(Client):
                 loss.backward()
                 optimizer.step()
 
-                
-
-
-
-        print(f"Backdoor update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"Backdoor update norm: {Client.state_dict_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
 
@@ -142,11 +221,11 @@ class LabelFlipping(Client):
                 loss.backward()
                 optimizer.step()
 
-        print(f"Label flipping model update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"Label flipping model update norm: {Client.state_dict_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
     
-    def model_update_norm(self, model_i, model_f):
+    def state_dict_update_norm(self, model_i, model_f):
         model_update_norm = 0 
         for k in model_f.keys():
             diff = model_f[k] - model_i[k]
@@ -158,8 +237,9 @@ class LabelFlipping(Client):
 # For a large round count, NaN values can still appear. 
 # This happens due to the legitimate algorithm breaking with large values. 
 class GradientAscent(Client):
-    def __init__(self, client_id, model, dataset, indices, device):
+    def __init__(self, client_id, model, dataset, indices, device, mal_angle = 0):
         super().__init__(client_id, model, dataset, indices, device)
+        self.mal_angle = mal_angle * math.pi / 180
 
     def train(self, epochs=1, lr=0.01):
         self.model.train()
@@ -178,8 +258,8 @@ class GradientAscent(Client):
                 optimizer.step()
 
         # Calculate model update norm: 
-        honest_state = self.model.state_dict()
-        honest_update_norm = Client.model_update_norm(initial_state, honest_state)
+        honest_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        honest_update_norm = Client.state_dict_update_norm(initial_state, honest_state)
         
         # If trained honest model has nan, break out of here
         for k in honest_state.keys():
@@ -214,29 +294,26 @@ class GradientAscent(Client):
                 optimizer.step()
 
         # --- Normalize model updates --- #
-        mal_update_norm = Client.model_update_norm(initial_state, self.model.state_dict())
-        scale = honest_update_norm / mal_update_norm
-        # Return honest update if gradient ascent results in nan parameter values
-        if (torch.isnan(torch.tensor(scale))): 
-            return honest_state
-        # print(f"Scale: {honest_update_norm}/{mal_update_norm} = {scale}")
-        # If honest update is larger than malicious update, don't upscale malicious update
-        if (scale > 1):
-            scale = 1
-            return self.model.state_dict()
-        else:    
-            # Normalize model update using model_update_norm
-            mal_state = {}
-            for k in self.model.state_dict().keys():
-                diff = self.model.state_dict()[k] - initial_state[k]
-                diff.mul_(scale)
-                mal_state[k] = initial_state[k] + diff
-                if (torch.isnan(mal_state[k]).any()):
-                    return honest_state
-                
-        print(f"GradientAscent model update norm: {Client.model_update_norm(initial_state, mal_state)}") 
-                    
-        return mal_state
+        mal_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        if (self.mal_angle == 0):
+            #normalize model update to the same magnitude as honest update
+            (norm_state, scale) = Client.state_dict_normalize(initial_state, mal_state, honest_update_norm)
+            print(f"Grad ascent norm: {Client.state_dict_update_norm(initial_state, mal_state)}, scale: {scale}")
+
+            # Return honest update if mal update has nan
+            if (torch.isnan(torch.tensor(scale))):
+                return honest_state
+            # If honest update is larger than malicious update, don't upscale malicious update
+            if (scale > 1):
+                return self.model.state_dict()
+            else:    
+                for k in norm_state.keys():
+                    if (torch.isnan(norm_state[k]).any()):
+                        return honest_state
+                return norm_state
+        # If set cosine angle, normalize magniude and modify angle
+        else: 
+            return Client.state_dict_rotate(initial_state, honest_state, mal_state, self.mal_angle)
 
     
 # Gradient ascent without the normalization
@@ -268,7 +345,7 @@ class GradientAscentNoScale(Client):
 
                 optimizer.step()
 
-        print(f"GradientAscent model update norm: {Client.model_update_norm(initial_state, self.model.state_dict())}") 
+        print(f"GradientAscent model update norm: {Client.state_dict_update_norm(initial_state, self.model.state_dict())}") 
         
         return self.model.state_dict()
 
@@ -299,7 +376,7 @@ class SignFlipping(Client):
             delta = self.model.state_dict()[k] - initial_state[k]
             flipped_state[k] = initial_state[k] - delta 
 
-        print(f"SignFlipping model update norm: {Client.model_update_norm(initial_state, flipped_state)}") 
+        print(f"SignFlipping model update norm: {Client.state_dict_update_norm(initial_state, flipped_state)}") 
 
         return flipped_state
 

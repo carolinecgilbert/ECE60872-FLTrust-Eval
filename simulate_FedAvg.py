@@ -48,7 +48,7 @@ if __name__ == "__main__":
     clients = []
     for i, idxs in enumerate(client_indices):
         if i < num_malicious:
-            clients.append(Backdoor(i, CNN(), train_dataset, idxs, device))
+            clients.append(GradientAscent(i, CNN(), train_dataset, idxs, device, 10))
         else:
             clients.append(Client(i, CNN(), train_dataset, idxs, device))
 
