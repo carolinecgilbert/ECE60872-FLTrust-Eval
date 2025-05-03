@@ -1,4 +1,4 @@
-from client import P2PClient, MaliciousClient
+from client import *
 from server import Server
 from dataset import MNISTDataset
 from model import CNN
@@ -63,7 +63,7 @@ if __name__ == "__main__":
         if i < num_malicious:
             clients.append(MaliciousClient(i, CNN(), train_dataset, idxs, device))
         else:
-            clients.append(P2PClient(i, CNN(), train_dataset, idxs, device))
+            clients.append(P2PFLTrustClient(i, CNN(), train_dataset, idxs, device))
 
     # Initialize the mixing matrix for P2PFL
     neighbors_dict = {i: [j for j in range(num_clients) if j != i] for i in range(num_clients)}
@@ -74,6 +74,10 @@ if __name__ == "__main__":
     print("Starting P2PFL simulation...")
     start_time = time.time()
     for r in range(rounds):
+        # Store local updates
+        for client in clients:
+            client.store_local_update()
+
         # Local training
         for client in clients:
             client.train()
@@ -83,14 +87,18 @@ if __name__ == "__main__":
             neighbors = neighbors_dict[client.id]
             peer_models = {}
             weights = {}
+
             for nid in neighbors + [client.id]: 
                 peer = clients[nid]
                 peer_model = model.to(client.device)
                 peer_model.load_state_dict(copy.deepcopy(peer.model.state_dict()))
                 peer_models[nid] = peer_model
                 weights[nid] = mixing_matrix[client.id, nid].item()
+
             client.aggregate_models(peer_models, weights)
+
         print(f"Round {r+1} complete")
+
     end_time = time.time()
     print(f"P2PFL simulation completed in {end_time - start_time:.4f} seconds")
 
