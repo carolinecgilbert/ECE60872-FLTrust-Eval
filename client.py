@@ -1,8 +1,12 @@
 import torch
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
+from collections import defaultdict
 
 TRUST_THRESHOLD = 0.1
+WINDOW_SIZE = 5
+LOW_TRUST_COUNT_THRESHOLD = 2
+LOW_TRUST_SCORE = 0.05
 
 class Client:
     """
@@ -161,6 +165,57 @@ class P2PFLTrustClient(P2PClient):
 
         for pid, update in translated_updates.items():
             if pid not in trust_scores or trust_scores[pid] < TRUST_THRESHOLD:
+                continue
+            weight = trust_scores[pid] * weights[pid]
+            for i in range(len(weighted_sum)):
+                weighted_sum[i] += weight * update[i]
+
+        for p, delta in zip(self.model.parameters(), weighted_sum):
+            p.data += delta / total_weight
+
+class P2PFLTrustTrackingClient(P2PClient):
+    def __init__(self, client_id, model, dataset, indices, device):
+        super().__init__(client_id, model, dataset, indices, device)
+        self.prev_params = None  
+        self.trust_history = defaultdict(list)
+
+    def aggregate_models(self, peer_clients, weights):
+        g_self = self.get_local_update()
+        g_self_norm = torch.norm(g_self).clamp(min=1e-8)
+
+        trust_scores = {}
+        translated_updates = {}
+
+        for pid, peer in peer_clients.items():
+            if pid == self.id:
+                continue
+
+            delta_peer = [curr.data - prev for curr, prev in zip(peer.model.parameters(), peer.prev_params)]
+            g_peer = torch.cat([u.view(-1) for u in delta_peer])
+            g_peer_norm = torch.norm(g_peer).clamp(min=1e-8)
+
+            cosine_sim = torch.dot(g_peer, g_self) / (g_peer_norm * g_self_norm)
+            raw_score = F.relu(cosine_sim).item()
+
+            self.trust_history[pid].append(raw_score)
+            low_count = sum(1 for s in self.trust_history[pid] if s < TRUST_THRESHOLD)
+
+            adjusted_score = raw_score
+            if low_count >= LOW_TRUST_COUNT_THRESHOLD:
+                adjusted_score *= 0.1  # penalty for repeated low trust
+
+            trust_scores[pid] = adjusted_score
+            translated_updates[pid] = delta_peer
+
+        weighted_sum = [torch.zeros_like(p) for p in self.model.parameters()]
+        total_weight = sum(trust_scores[pid] * weights[pid] for pid in trust_scores if trust_scores[pid] >= LOW_TRUST_SCORE)
+
+        if total_weight < 1e-10:
+            print(f"Client {self.id} skipping aggregation (total trust weight too small).")
+            return
+
+        for pid, update in translated_updates.items():
+            if trust_scores[pid] < LOW_TRUST_SCORE:
                 continue
             weight = trust_scores[pid] * weights[pid]
             for i in range(len(weighted_sum)):
