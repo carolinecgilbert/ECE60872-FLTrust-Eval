@@ -114,21 +114,29 @@ class P2PClient(Client):
 
 
 class P2PFLTrustClient(P2PClient):
+    """
+    Simulation of a P2P Client with trust scores in FL.
+    """
     def __init__(self, client_id, model, dataset, indices, device):
         super().__init__(client_id, model, dataset, indices, device)
         self.prev_params = None  
         self.trust_history = {}
 
     def aggregate_models(self, peer_clients, weights):
+        """
+        Aggregate models from peers using a weighted sum based on trust scores.
+        """
+        # Compute the local update
         g_self = self.get_local_update()
         g_self_norm = torch.norm(g_self)
 
         trust_scores = {}
         translated_updates = {}
 
+        # Compute trust scores and translated updates
         for pid, peer in peer_clients.items():
             if pid == self.id:
-                continue  # skip self in trust comparison
+                continue  
 
             peer_prev_params = peer.prev_params
             peer_curr_params = list(peer.model.parameters())
