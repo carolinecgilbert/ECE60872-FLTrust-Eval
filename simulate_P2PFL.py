@@ -28,7 +28,7 @@ if __name__ == "__main__":
     # Default client set up
     num_clients = 5
     num_malicious = 0
-    rounds = 10
+    rounds = 5
 
     # Check for command line arguments to change client setup
     if len(sys.argv) > 1:
@@ -41,8 +41,7 @@ if __name__ == "__main__":
     print(f"Number of malicious clients: {num_malicious}")
     print(f"Number of rounds: {rounds}")
 
-    # Initialize the global model and dataset
-    model = CNN()
+    # Initialize datasets
     dataset = MNISTDataset()
     train_dataset = dataset.get_train_dataset()
     client_indices = dataset.partition_train_dataset(num_clients)
@@ -61,7 +60,7 @@ if __name__ == "__main__":
     clients = []
     for i, idxs in enumerate(client_indices):
         if i < num_malicious:
-            clients.append(MaliciousClient(i, CNN(), train_dataset, idxs, device))
+            clients.append(MaliciousP2PFLTrustClient(i, CNN(), train_dataset, idxs, device))
         else:
             clients.append(P2PFLTrustClient(i, CNN(), train_dataset, idxs, device))
 
@@ -82,20 +81,17 @@ if __name__ == "__main__":
         for client in clients:
             client.train()
 
+
         # Aggregation using mixing matrix
         for client in clients:
             neighbors = neighbors_dict[client.id]
-            peer_models = {}
+            peer_clients = {}
             weights = {}
-
-            for nid in neighbors + [client.id]: 
-                peer = clients[nid]
-                peer_model = model.to(client.device)
-                peer_model.load_state_dict(copy.deepcopy(peer.model.state_dict()))
-                peer_models[nid] = peer_model
+            for nid in neighbors + [client.id]:
+                peer_clients[nid] = clients[nid]
                 weights[nid] = mixing_matrix[client.id, nid].item()
+            client.aggregate_models(peer_clients, weights)
 
-            client.aggregate_models(peer_models, weights)
 
         print(f"Round {r+1} complete")
 
@@ -126,5 +122,13 @@ if __name__ == "__main__":
     test_loader = torch.utils.data.DataLoader(dataset.get_test_dataset(), batch_size=32, shuffle=False)
     for client in clients:
         client.test(test_loader)
+
+    # Print trust tracking for each client
+    print("\n--- Trust Tracking Summary ---")
+    for client in clients:
+        if hasattr(client, 'trust_history'):
+            print(f"Client {client.id} trust history:")
+            for peer_id, scores in client.trust_history.items():
+                print(f"  Peer {peer_id}: {[f'{s:.4f}' for s in scores]}")
     print("Simulation complete")
 

@@ -2,6 +2,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 
+TRUST_THRESHOLD = 0.1
+
 class Client:
     """
     Simulation of a client in a federated learning.
@@ -63,11 +65,14 @@ class MaliciousClient(Client):
                 output = self.model(x)
                 loss = F.cross_entropy(output, y)
                 # Basic attack: reverse the gradient for malicious behavior
-                # TODO: Implement an attack class for more complex attacks
-                loss = -loss 
                 loss.backward()
                 optimizer.step()
-        return self.model.state_dict()
+
+        # Dummy attack: arbitrarily scale model parameters (malicious update)
+        with torch.no_grad():
+            for p in self.model.parameters():
+                p.data *= 5.0  # exaggerate the model weights
+            return self.model.state_dict()
     
 class P2PClient(Client):
     """
@@ -78,16 +83,18 @@ class P2PClient(Client):
         self.prev_params = None
 
     def store_local_update(self):
-        """
-        Store the local update for the client.
-        """
         self.prev_params = [p.clone().detach() for p in self.model.parameters()]
 
     def get_local_update(self):
-        """
-        Get the local update for the client.
-        """
         return torch.cat([(p.data - prev).view(-1) for p, prev in zip(self.model.parameters(), self.prev_params)])
+    
+    def extract_update(self, peer):
+        """
+        Compute the update vector of a peer using the peer's own stored parameters.
+        """
+        return [(param.data - old_param).detach().clone()
+                for param, old_param in zip(peer.model.parameters(), peer.prev_params)]
+
 
     def aggregate_models(self, peer_models, weights):
         """
@@ -103,70 +110,92 @@ class P2PClient(Client):
 
 
 class P2PFLTrustClient(P2PClient):
-    """
-    Simulation of a P2PFLTrust client in federated learning.
+    def __init__(self, client_id, model, dataset, indices, device):
+        super().__init__(client_id, model, dataset, indices, device)
+        self.prev_params = None  
+        self.trust_history = {}
+
+    def aggregate_models(self, peer_clients, weights):
+        g_self = self.get_local_update()
+        g_self_norm = torch.norm(g_self)
+
+        trust_scores = {}
+        translated_updates = {}
+
+        for pid, peer in peer_clients.items():
+            if pid == self.id:
+                continue  # skip self in trust comparison
+
+            peer_prev_params = peer.prev_params
+            peer_curr_params = list(peer.model.parameters())
+            delta_peer = [curr.data - prev for curr, prev in zip(peer_curr_params, peer_prev_params)]
+
+            # Translate peer update to local context
+            translated = [p.data + delta for p, delta in zip(self.model.parameters(), delta_peer)]
+            translated_update = [t - p.data for t, p in zip(translated, self.
+            model.parameters())]
+
+            g_peer = torch.cat([u.view(-1) for u in translated_update])
+
+            g_peer_norm = torch.norm(g_peer)
+            if g_peer_norm > 0 and g_self_norm > 0:
+                cosine_sim = torch.dot(g_peer, g_self) / (g_peer_norm * g_self_norm)
+                trust_scores[pid] = F.relu(cosine_sim).item()
+            else:
+                trust_scores[pid] = 0.0
+
+            translated_updates[pid] = translated_update
+
+        # Update trust history
+        for pid, score in trust_scores.items():
+            if pid not in self.trust_history:
+                self.trust_history[pid] = []
+            self.trust_history[pid].append(score)
+
+        weighted_sum = [torch.zeros_like(p) for p in self.model.parameters()]
+        total_weight = sum(trust_scores[pid] * weights[pid] for pid in trust_scores)
+
+        if total_weight < 1e-10:
+            print(f"Client {self.id} skipping aggregation (total trust weight too small).")
+            return
+
+        for pid, update in translated_updates.items():
+            if pid not in trust_scores or trust_scores[pid] < TRUST_THRESHOLD:
+                continue
+            weight = trust_scores[pid] * weights[pid]
+            for i in range(len(weighted_sum)):
+                weighted_sum[i] += weight * update[i]
+
+        for p, delta in zip(self.model.parameters(), weighted_sum):
+            p.data += delta / total_weight
+
+
+
+class MaliciousP2PFLTrustClient(P2PFLTrustClient):
+    """"
+    Simulation of a malicious client in a federated learning.
+    This client injects attacks during model training.
     """
     def __init__(self, client_id, model, dataset, indices, device):
         super().__init__(client_id, model, dataset, indices, device)
-        self.prev_params = None
 
-    def aggregate_models(self, peer_models, weights):
-        """
-        Aggregate models from peers using a weighted sum and trust scores as in FLTrust.
-        """
-        # Compute trust scores and normalize updates
-        local_update = self.get_local_update()
-        peer_updates = {}
-        for pid, model in peer_models.items():
-            peer_updates[pid] = self.extract_update(model)
-        trust_scores = self.compute_trust_scores(peer_updates, local_update)
-        normalized_updates = self.normalize_updates(peer_updates, local_update)
+    def train(self, epochs=1, lr=0.01):
+        self.model.train()
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=lr)
+        for _ in range(epochs):
+            for x, y in self.train_data:
+                x, y = x.to(self.device), y.to(self.device)
+                optimizer.zero_grad()
+                output = self.model(x)
+                loss = F.cross_entropy(output, y)
+                # Basic attack: reverse the gradient for malicious behavior
+                loss.backward()
+                optimizer.step()
 
-        # Normalize the updates
-        weighted_sum = [torch.zeros_like(p) for p in self.model.parameters()]
-        norm_factor = sum(trust_scores[pid] * weights[pid] for pid in peer_models)
-        norm_factor = max(norm_factor, 1e-10)
-
-        for pid, norm_update in normalized_updates.items():
-            for i, param in enumerate(weighted_sum):
-                param += (trust_scores[pid] * weights[pid]) * norm_update[i]
-
-        # Update the model parameters
-        for p, new in zip(self.model.parameters(), weighted_sum):
-            p.data -= new / norm_factor
-
-    def extract_update(self, model):
-        return [param.data - base.data for param, base in zip(model.parameters(), self.model.parameters())]
-
-    def compute_trust_scores(self, peer_updates, local_update):
-        """
-        Compute trust scores based on cosine similarity between local update
-        and peer updates.
-        """
-        trust_scores = {}
-        g0_norm = torch.norm(local_update)
-        for cid, update in peer_updates.items():
-            update_flat = torch.cat([u.view(-1) for u in update])  # flatten list of tensors
-            gi_norm = torch.norm(update_flat)
-            cosine_sim = torch.dot(update_flat, local_update) / (gi_norm * g0_norm + 1e-10)
-            trust_scores[cid] = F.relu(cosine_sim).item()
-        return trust_scores
-
-    def normalize_updates(self, peer_updates, local_update):
-        """
-        Normalize peer updates based on the local update.
-        """
-        g0_norm = torch.norm(local_update)
-        normalized = {}
-        for cid, update in peer_updates.items():
-            update_flat = torch.cat([u.view(-1) for u in update])
-            gi_norm = torch.norm(update_flat)
-            if gi_norm > 0:
-                scaled = [(g0_norm / gi_norm) * u for u in update]
-                normalized[cid] = scaled
-            else:
-                normalized[cid] = [torch.zeros_like(u) for u in update]
-        return normalized
-
+        # Dummy attack: arbitrarily scale model parameters (malicious update)
+        with torch.no_grad():
+            for p in self.model.parameters():
+                p.data *= 5.0  # exaggerate the model weights
+            return self.model.state_dict()
     
 
