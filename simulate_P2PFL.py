@@ -58,11 +58,12 @@ if __name__ == "__main__":
 
     # Initialize clients
     clients = []
+    model = CNN()
     for i, idxs in enumerate(client_indices):
         if i < num_malicious:
-            clients.append(MaliciousP2PFLTrustClient(i, CNN(), train_dataset, idxs, device))
+            clients.append(MaliciousP2PFLTrustClient(i, copy.deepcopy(model), train_dataset, idxs, device))
         else:
-            clients.append(P2PFLTrustClient(i, CNN(), train_dataset, idxs, device))
+            clients.append(P2PFLTrustClient(i, copy.deepcopy(model), train_dataset, idxs, device))
 
     # Initialize the mixing matrix for P2PFL
     neighbors_dict = {i: [j for j in range(num_clients) if j != i] for i in range(num_clients)}
