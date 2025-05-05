@@ -1,6 +1,9 @@
 import copy
 import torch
 
+from client import Backdoor
+import matplotlib.pyplot as plt
+
 class Server:
     """"
     Federated Learning Server to aggregate model updates from clients.
@@ -29,8 +32,22 @@ class Server:
         self.global_model.eval()
         correct = 0
         total = 0
+
+        # Backdoor trigger pattern
+        trigger_pattern = torch.tensor([[-.42, -.42, -.42, -.42, -.42], 
+                                        [-.42, 2.80, 2.80, 2.80, -.42], 
+                                        [-.42, 2.80, -.42, 2.80, -.42], 
+                                        [-.42, 2.80, -.42, 2.80, -.42], 
+                                        [-.42, 2.80, 2.80, 2.80, -.42], 
+                                        [-.42, -.42, -.42, -.42, -.42]])
+
         with torch.no_grad():
             for x, y in test_loader:
+
+                # Add backdoor pattern
+                # for image in x:
+                #     image[0] = Backdoor.add_trigger(image[0], trigger_pattern)
+
                 x, y = x.to(self.device), y.to(self.device)
                 outputs = self.global_model(x) 
                 _, predicted = torch.max(outputs.data, 1)
