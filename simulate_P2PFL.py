@@ -65,14 +65,14 @@ if __name__ == "__main__":
     model = CNN()
     for i, idxs in enumerate(client_indices):
         if i < num_malicious:
-            clients.append(SignFlipping(i, copy.deepcopy(model), train_dataset, idxs, device))
+            clients.append(Backdoor(i, copy.deepcopy(model), train_dataset, idxs, device))
         else:
             clients.append(P2PFLTrustClient(i, copy.deepcopy(model), train_dataset, idxs, device))
 
     # Initialize the mixing matrix for P2PFL
     neighbors_dict = {i: [j for j in range(num_clients) if j != i] for i in range(num_clients)}
     mixing_matrix = build_mixing_matrix(neighbors_dict)
-    print("Mixing matrix:\n", mixing_matrix)
+    # print("Mixing matrix:\n", mixing_matrix)
 
     # Simulate federated learning rounds
     print("Starting P2PFL simulation...")
@@ -106,13 +106,28 @@ if __name__ == "__main__":
     # Consensus distance computation
     consensus_dist_all= consensus_error(clients)
     print(f"Consensus distance: {consensus_dist_all:.4f}")
-    consensus_dist_honest = consensus_error([c for i,c in enumerate(clients) if i >= num_malicious])
-    print(f"Consensus distance (honest clients): {consensus_dist_honest:.4f}")
+    if num_clients > num_malicious:
+        consensus_dist_honest = consensus_error([c for i,c in enumerate(clients) if i >= num_malicious])
+        print(f"Consensus distance (honest clients): {consensus_dist_honest:.4f}")
     
     # Test each client's model
     test_loader = torch.utils.data.DataLoader(dataset.get_test_dataset(), batch_size=32, shuffle=False)
-    for client in clients:
-        client.test(test_loader)
+    if isinstance(clients[0], Backdoor):
+        print("Testing with backdoor...")
+        trigger = True
+    else:
+        trigger = False
+
+    # Compute average honest model accuracy
+    honest_acc = 0
+    for i, client in enumerate(clients):
+        acc = client.test(test_loader, trigger)
+        if i >= num_malicious:
+            honest_acc += acc
+    if num_clients > num_malicious:
+        honest_acc /= (num_clients - num_malicious)
+        print(f"Average honest model accuracy: {honest_acc:.4f}%")
+
 
     # Print trust tracking for each client
     print("\n--- Trust Tracking Summary ---")
@@ -128,11 +143,7 @@ if __name__ == "__main__":
     server.aggregate_trusted_models()
 
     # Test the aggregated model
-    if isinstance(clients[0], Backdoor):
-        print("Testing with backdoor...")
-        server.test(test_loader, trigger=True)
-    else:
-        server.test(test_loader)
+    server.test(test_loader, trigger)
     
     print("Simulation complete")
 
