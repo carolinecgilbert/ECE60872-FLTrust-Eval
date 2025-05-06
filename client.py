@@ -43,23 +43,38 @@ class Client:
 
         return self.model.state_dict()
       
-    def test(self, test_loader):
+    def test(self, test_loader, trigger=False):
         """
-        Test the local model on the test dataset.
+        Test the global model on the test dataset.
         """
         self.model.to(self.device)
         self.model.eval()
         correct = 0
         total = 0
+
+        # Backdoor trigger pattern
+        trigger_pattern = torch.tensor([[-.42, -.42, -.42, -.42, -.42], 
+                                        [-.42, 2.80, 2.80, 2.80, -.42], 
+                                        [-.42, 2.80, -.42, 2.80, -.42], 
+                                        [-.42, 2.80, -.42, 2.80, -.42], 
+                                        [-.42, 2.80, 2.80, 2.80, -.42], 
+                                        [-.42, -.42, -.42, -.42, -.42]])
+
         with torch.no_grad():
             for x, y in test_loader:
+
+                # Add backdoor pattern
+                if trigger:
+                    for image in x:
+                        image[0] = Backdoor.add_trigger(image[0], trigger_pattern)
+
                 x, y = x.to(self.device), y.to(self.device)
                 outputs = self.model(x) 
                 _, predicted = torch.max(outputs.data, 1)
                 total += y.size(0)
                 correct += (predicted == y).sum().item()
         accuracy = 100 * correct / total
-        print(f"Client {self.id} Test Accuracy: {accuracy:.4f}%")
+        print(f"Client {self.id} Test Accuracy: {accuracy:.4f}%")        
         return accuracy
       
     
@@ -222,12 +237,15 @@ class P2PFLTrustClient(P2PClient):
             if any(torch.isnan(v).any() for v in peer_final.values()):
                 print(f"Client {self.id} detected NaN in peer {pid}'s model, skipping.")
                 trust_scores[pid] = 0.0
+                self.trust_history[pid].append(0.0)
                 continue
 
             # Compute cosine similarity between updates
             cosine_sim = Client.state_dict_cosine_sim(local_final, peer_final)
             if math.isnan(cosine_sim):
                 print(f"Client {self.id} skipping peer {pid} due to NaN cosine similarity.")
+                trust_scores[pid] = 0.0
+                self.trust_history[pid].append(0.0)
                 continue
 
             # Normalize peer update to match local update norm (FLTrust)
@@ -237,8 +255,8 @@ class P2PFLTrustClient(P2PClient):
             if cosine_sim < TRUST_ANGLE_THRESHOLD or scale > SCALE_UPPER_LIMIT:
                 print(f"Client {self.id} rejected peer {pid}: cosine_sim={cosine_sim:.4f}, scale={scale:.4f}")
                 trust_scores[pid] = 0.0
+                self.trust_history[pid].append(0.0)
                 continue
-
             trust_score = max(0.0, cosine_sim)
             trust_scores[pid] = trust_score
 

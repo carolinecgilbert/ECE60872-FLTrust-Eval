@@ -15,6 +15,8 @@ def consensus_error(clients):
     """
     Compute the consensus distance between the models of all clients.
     """
+    if len(clients) == 0:
+        return None
     with torch.no_grad():
         # Compute the average model parameters
         avg_params = [torch.zeros_like(p) for p in clients[0].model.parameters()]
@@ -32,7 +34,26 @@ def consensus_error(clients):
                 error += torch.norm(p.data - avg_params[i])**2
             consensus_error += error.item()
         consensus_error /= len(clients)
-        return consensus_error 
+        return consensus_error
+
+def pairwise_consensus_scores(clients):
+        """
+        Compute average model distance for each client to all others.
+        """
+        n = len(clients)
+        scores = {}
+        model_states = [c.model.state_dict() for c in clients]
+
+        dist_matrix = torch.zeros((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = model_distance(model_states[i], model_states[j])
+                dist_matrix[i, j] = dist
+                dist_matrix[j, i] = dist
+
+        for i in range(n):
+            scores[clients[i].id] = dist_matrix[i].sum().item() / (n - 1)
+        return scores 
 
 class Server:
     """"
@@ -152,7 +173,7 @@ class P2PServer():
                 final_scores[pid] = 0.0
         return final_scores
     
-    def select_top_trusted_clients(self, final_scores, top_percent=0.6):
+    def select_top_trusted_clients(self, final_scores, top_percent=0.33):
         """
         Select top_percent % of clients based on final aggregated trust scores.
         """
@@ -170,6 +191,7 @@ class P2PServer():
         
         # Compute final trust scores
         final_scores = self.compute_final_trust_scores()
+        print(f"Final trust scores: {final_scores}")
         trusted_clients = self.select_top_trusted_clients(final_scores)
 
         if len(trusted_clients) == 0:
