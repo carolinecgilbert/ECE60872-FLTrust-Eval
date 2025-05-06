@@ -1,5 +1,5 @@
 from client import *
-from server import Server
+from server import *
 from dataset import MNISTDataset
 from model import CNN
 
@@ -8,9 +8,11 @@ import sys
 import time
 import copy
 
-# Build the mixing matrix for P2PFL with stochastic rows and columns
 def build_mixing_matrix(neighbors_dict):
-    # neighbors_dict: dict of client_id -> list of neighbor client_ids
+    """
+    Build the mixing matrix for P2PFL with stochastic rows and columns.
+    (ONLY for P2PFL)
+    """
     n = len(neighbors_dict)
     W = torch.zeros((n, n))
     for i in range(n):
@@ -20,30 +22,7 @@ def build_mixing_matrix(neighbors_dict):
         W[i, i] = 1.0 - W[i].sum()
     return W
 
-# Check consensus by computing average pairwise L2 distance
-def model_distance(m1, m2):
-    return sum(torch.norm(p1.data - p2.data).item() for p1, p2 in zip(m1.parameters(), m2.parameters()))
-
-def compute_consensus_distance(clients):
-    with torch.no_grad():
-        # Compute the average model parameters
-        avg_params = [torch.zeros_like(p) for p in clients[0].model.parameters()]
-        for client in clients:
-            for i, p in enumerate(client.model.parameters()):
-                avg_params[i] += p.data
-        for i in range(len(avg_params)):
-            avg_params[i] /= len(clients)
-
-        # Compute the consensus error
-        consensus_error = 0.0
-        for client in clients:
-            error = 0.0
-            for i, p in enumerate(client.model.parameters()):
-                error += torch.norm(p.data - avg_params[i])**2
-            consensus_error += error.item()
-        consensus_error /= len(clients)
-        return consensus_error    
-
+   
 if __name__ == "__main__":
     # Default client set up
     num_clients = 5
@@ -125,10 +104,10 @@ if __name__ == "__main__":
     print(f"P2PFL simulation completed in {end_time - start_time:.4f} seconds")
 
     # Consensus distance computation
-    consensus_distance = compute_consensus_distance(clients)
-    print(f"Consensus distance: {consensus_distance:.4f}")
-    consensus_distance_honest = compute_consensus_distance([c for i,c in enumerate(clients) if i >= num_malicious])
-    print(f"Consensus distance (honest clients): {consensus_distance_honest:.4f}")
+    consensus_dist_all= consensus_error(clients)
+    print(f"Consensus distance: {consensus_dist_all:.4f}")
+    consensus_dist_honest = consensus_error([c for i,c in enumerate(clients) if i >= num_malicious])
+    print(f"Consensus distance (honest clients): {consensus_dist_honest:.4f}")
     
     # Test each client's model
     test_loader = torch.utils.data.DataLoader(dataset.get_test_dataset(), batch_size=32, shuffle=False)
@@ -142,5 +121,14 @@ if __name__ == "__main__":
             print(f"Client {client.id} trust history:")
             for peer_id, scores in client.trust_history.items():
                 print(f"  Peer {peer_id}: {[f'{s:.4f}' for s in scores]}")
+
+
+    # Aggregate final models
+    server = P2PServer(clients, copy.deepcopy(model), device)
+    server.aggregate_trusted_models()
+
+    # Test the aggregated model
+    server.test(test_loader)
+    
     print("Simulation complete")
 

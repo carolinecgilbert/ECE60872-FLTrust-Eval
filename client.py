@@ -208,9 +208,6 @@ class P2PFLTrustClient(P2PClient):
         normalized_peer_models = {}
 
         for pid, peer in peer_clients.items():
-            # if pid == self.id:
-            #     continue
-
             # Compute peer model update 
             peer_init = {k: p.clone().detach() for k, p in zip(peer.model.state_dict().keys(), peer.prev_params)}
             peer_final = peer.model.state_dict()
