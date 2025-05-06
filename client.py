@@ -8,7 +8,9 @@ import random
 # Hyperparameters for tracking low trust clients
 LOW_TRUST_PENALTY = 0.5
 LOW_TRUST_COUNT_THRESHOLD = 3
-LOW_TRUST_SCORE = 0.1
+LOW_TRUST_SCORE = 0.5
+TRUST_ANGLE_THRESHOLD = 0.7
+SCALE_UPPER_LIMIT = 2.0
 
 class Client:
     """
@@ -91,6 +93,10 @@ class Client:
                 model_n[k] = model_i[k] + update[k]
         else:
             update_norm = Client.state_dict_norm(model_f)
+            if update_norm < 1e-10:
+                print("Update norm is too small, returning original model.")
+                return (model_f, 1.0)
+
             scale = norm / update_norm
             
             model_n = {k: v.clone() for k, v in model_f.items()}
@@ -208,16 +214,35 @@ class P2PFLTrustClient(P2PClient):
         normalized_peer_models = {}
 
         for pid, peer in peer_clients.items():
-            # Compute peer model update 
+            # Compute peer model update
             peer_init = {k: p.clone().detach() for k, p in zip(peer.model.state_dict().keys(), peer.prev_params)}
             peer_final = peer.model.state_dict()
 
-            # Compute trust score via cosine similarity between local and peer update (FLTrust)
+            # Guard against NaN values
+            if any(torch.isnan(v).any() for v in peer_final.values()):
+                print(f"Client {self.id} detected NaN in peer {pid}'s model, skipping.")
+                trust_scores[pid] = 0.0
+                continue
+
+            # Compute cosine similarity between updates
             cosine_sim = Client.state_dict_cosine_sim(local_final, peer_final)
-            trust_score = max(0.0, cosine_sim)  
+            if math.isnan(cosine_sim):
+                print(f"Client {self.id} skipping peer {pid} due to NaN cosine similarity.")
+                continue
+
+            # Normalize peer update to match local update norm (FLTrust)
+            normed_peer_model, scale = Client.state_dict_normalize(peer_init, peer_final, local_update_norm)
+
+            # Reject updates that are misaligned or too large
+            if cosine_sim < TRUST_ANGLE_THRESHOLD or scale > SCALE_UPPER_LIMIT:
+                print(f"Client {self.id} rejected peer {pid}: cosine_sim={cosine_sim:.4f}, scale={scale:.4f}")
+                trust_scores[pid] = 0.0
+                continue
+
+            trust_score = max(0.0, cosine_sim)
             trust_scores[pid] = trust_score
 
-            # Apply penalty for repeated low trust (Novel FLTrust)
+            # Apply penalty for repeated low trust
             if self.apply_penalties:
                 low_count = sum(1 for s in self.trust_history[pid] if s < LOW_TRUST_SCORE)
                 if low_count >= LOW_TRUST_COUNT_THRESHOLD:
@@ -225,14 +250,10 @@ class P2PFLTrustClient(P2PClient):
                     trust_score *= LOW_TRUST_PENALTY
                     trust_scores[pid] = trust_score
 
-            # Update trust history
             self.trust_history[pid].append(trust_score)
-
-            # Normalize peer update to match local update norm (FLTrust)
-            normed_peer_model, _ = Client.state_dict_normalize(peer_init, peer_final, local_update_norm)
             normalized_peer_models[pid] = normed_peer_model
 
-        # Weighted aggregation using trust 
+        # Weighted aggregation using trust scores
         total_trust = sum(trust_scores.values())
         if total_trust < 1e-10:
             print(f"Client {self.id} skipping aggregation (total trust weight too small).")
@@ -244,7 +265,6 @@ class P2PFLTrustClient(P2PClient):
             for k in update_sum:
                 update_sum[k] += ts * (peer_model[k] - self.model.state_dict()[k])
 
-        # Aggregate the updates
         for k in self.model.state_dict().keys():
             self.model.state_dict()[k].add_(update_sum[k] / total_trust)
 
@@ -276,7 +296,7 @@ class MaliciousP2PFLTrustClient(P2PFLTrustClient):
             return self.model.state_dict()
     
 
-class Backdoor(Client):
+class Backdoor(P2PFLTrustClient):
 
     def __init__(self, client_id, model, dataset, indices, device, trigger_pattern = [[-.42, -.42, -.42, -.42, -.42], 
                                                                                       [-.42, 2.80, 2.80, 2.80, -.42], 
@@ -347,7 +367,7 @@ class Backdoor(Client):
       
 
 
-class LabelFlipping(Client):
+class LabelFlipping(P2PFLTrustClient):
     #                                                                         {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
     def __init__(self, client_id, model, dataset, indices, device, labelmap = [8, 1, 5, 8, 1, 5, 8, 1, 8, 8]):
         super().__init__(client_id, model, dataset, indices, device)
@@ -387,8 +407,8 @@ class LabelFlipping(Client):
 # Gradient and model updates are normalized to prevent NaN values from appearing
 # For a large round count, NaN values can still appear. 
 # This happens due to the legitimate algorithm breaking with large values. 
-class GradientAscent(Client):
-    def __init__(self, client_id, model, dataset, indices, device, mal_angle = 0):
+class GradientAscent(P2PFLTrustClient):
+    def __init__(self, client_id, model, dataset, indices, device, mal_angle = 10):
         super().__init__(client_id, model, dataset, indices, device)
         self.mal_angle = mal_angle * math.pi / 180
 
@@ -470,7 +490,7 @@ class GradientAscent(Client):
 # Gradient ascent without the normalization
 # Breaks model because model parameters blow up while training batches. This is why normalization is needed in the code above
 # Not good because too obvious, sending nan parameters to central server as a malicious update is boring
-class GradientAscentNoScale(Client):
+class GradientAscentNoScale(P2PFLTrustClient):
     def __init__(self, client_id, model, dataset, indices, device):
         super().__init__(client_id, model, dataset, indices, device)
 
@@ -501,7 +521,7 @@ class GradientAscentNoScale(Client):
         return self.model.state_dict()
 
 # Flips the model update in the opposite direction
-class SignFlipping(Client):
+class SignFlipping(P2PFLTrustClient):
     def __init__(self, client_id, model, dataset, indices, device):
         super().__init__(client_id, model, dataset, indices, device)
 

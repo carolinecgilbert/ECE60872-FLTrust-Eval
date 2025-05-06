@@ -97,7 +97,7 @@ class P2PServer():
         self.model = model.to(device)
         self.device = device
 
-    def test(self, test_loader):
+    def test(self, test_loader, trigger=False):
         """
         Test the global model on the test dataset.
         """
@@ -118,8 +118,9 @@ class P2PServer():
             for x, y in test_loader:
 
                 # Add backdoor pattern
-                # for image in x:
-                #     image[0] = Backdoor.add_trigger(image[0], trigger_pattern)
+                if trigger:
+                    for image in x:
+                        image[0] = Backdoor.add_trigger(image[0], trigger_pattern)
 
                 x, y = x.to(self.device), y.to(self.device)
                 outputs = self.model(x) 

@@ -65,7 +65,7 @@ if __name__ == "__main__":
     model = CNN()
     for i, idxs in enumerate(client_indices):
         if i < num_malicious:
-            clients.append(MaliciousP2PFLTrustClient(i, copy.deepcopy(model), train_dataset, idxs, device))
+            clients.append(SignFlipping(i, copy.deepcopy(model), train_dataset, idxs, device))
         else:
             clients.append(P2PFLTrustClient(i, copy.deepcopy(model), train_dataset, idxs, device))
 
@@ -128,7 +128,11 @@ if __name__ == "__main__":
     server.aggregate_trusted_models()
 
     # Test the aggregated model
-    server.test(test_loader)
+    if isinstance(clients[0], Backdoor):
+        print("Testing with backdoor...")
+        server.test(test_loader, trigger=True)
+    else:
+        server.test(test_loader)
     
     print("Simulation complete")
 
