@@ -3,20 +3,15 @@
 ## Environment
 This simulation uses Python 3.10 and PyTorch. See [environment.yml](environment.yml) for more specific information.
 ## How to Run the Simulation
-[simulate_FedAvg.py](simulate_FedAvg.py) runs a federated learning simulation that uses FedAvg as the aggregation rule with a basic CNN model. The FedAvg simulation serves as the baseline for our experiments since it does not have any defenses.
-The script can be run without any arguments and will set the number of clients to 5, number of malicious clients to 0, and number of rounds to 3 by default. Note: the current state of the malicious client's attack simply flips the sign of the loss value during training.
+[simulate_P2PFL.py](simulate_P2PFL.py) runs a federated learning simulation that uses our novel Peer-to-Peer Federated Learning (P2PFL) approach that incorporates FL Trust with a basic CNN model. We also added a novel penalty boost to clients with continuous low trust scores during training which can be activated as described in the command below. 
+The script can be run without any arguments and will set the number of clients to 5, number of malicious clients to 0, number of rounds to 5, and the trust score penalty boost set inactive by default.
 
-Alternatively, these parameters are configurable. For example, this command runs the simulation with 10 total clients, 1 malicious client, for 10 rounds.
+Alternatively, these parameters are configurable. For example, this command runs the simulation with 6 total clients, 1 malicious client, for 10 rounds with the trust score penalty boost activated.
 ```
-python simulate_FedAvg.py 6 1 10
+python simulate_FedAvg.py 6 1 10 true
 ```
 
-The simulation will indicate overall test accuracy of the global model.
+The simulation will indicate trust scores for each client over time, each client's local model accuracy after training, and the final aggregated model accuracy.
 
-## Future Work
-Next steps include the following:
-- Implement FLTrust, Krum, and Trimmed Mean/Median to compare against the baseline FedAvg simulation
-- Implement the following attacks: label flipping, Krum/Trim, Scaling
-- Run experiments against the established defenses with our attacks to identify vulnerabilities
-- Design our own novel, byzantine-robust aggregation rule to evaluate against FLTrust based on our experiments
+
 
