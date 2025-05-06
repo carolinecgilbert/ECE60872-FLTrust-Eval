@@ -2,8 +2,15 @@ import torch
 import math
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
-
+from collections import defaultdict
 import random
+
+# Hyperparameters for tracking low trust clients
+LOW_TRUST_PENALTY = 0.5
+LOW_TRUST_COUNT_THRESHOLD = 3
+LOW_TRUST_SCORE = 0.5
+TRUST_ANGLE_THRESHOLD = 0.7
+SCALE_UPPER_LIMIT = 2.0
 
 class Client:
     """
@@ -35,6 +42,26 @@ class Client:
         print(f"Honest model update norm: {Client.state_dict_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
+      
+    def test(self, test_loader):
+        """
+        Test the local model on the test dataset.
+        """
+        self.model.to(self.device)
+        self.model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for x, y in test_loader:
+                x, y = x.to(self.device), y.to(self.device)
+                outputs = self.model(x) 
+                _, predicted = torch.max(outputs.data, 1)
+                total += y.size(0)
+                correct += (predicted == y).sum().item()
+        accuracy = 100 * correct / total
+        print(f"Client {self.id} Test Accuracy: {accuracy:.4f}%")
+        return accuracy
+      
     
     # Takes a initial model state_dict and the model state_dict after an update. Calculates the magnitude of the update. 
     @staticmethod
@@ -66,6 +93,10 @@ class Client:
                 model_n[k] = model_i[k] + update[k]
         else:
             update_norm = Client.state_dict_norm(model_f)
+            if update_norm < 1e-10:
+                print("Update norm is too small, returning original model.")
+                return (model_f, 1.0)
+
             scale = norm / update_norm
             
             model_n = {k: v.clone() for k, v in model_f.items()}
@@ -125,8 +156,147 @@ class Client:
 
         return rotated_update
 
+class P2PClient(Client):
+    """
+    Simulation of a P2P client in federated learning.
+    """
+    def __init__(self, client_id, model, dataset, indices, device):
+        super().__init__(client_id, model, dataset, indices, device)
+        self.prev_params = None
 
-class Backdoor(Client):
+    def store_local_update(self):
+        self.prev_params = [p.clone().detach() for p in self.model.parameters()]
+
+    def get_local_update(self):
+        return torch.cat([(p.data - prev).view(-1) for p, prev in zip(self.model.parameters(), self.prev_params)])
+    
+    def extract_update(self, peer):
+        """
+        Compute the update vector of a peer using the peer's own stored parameters.
+        """
+        return [(param.data - old_param).detach().clone()
+                for param, old_param in zip(peer.model.parameters(), peer.prev_params)]
+
+
+    def aggregate_models(self, peer_models, weights):
+        """
+        Aggregate models from peers using a weighted sum.
+        """
+        new_params = [torch.zeros_like(p) for p in self.model.parameters()]
+        for peer_id, peer_model in peer_models.items():
+            w = weights[peer_id]
+            for i, param in enumerate(peer_model.parameters()):
+                new_params[i] += w * param.data
+        for p, new in zip(self.model.parameters(), new_params):
+            p.data.copy_(new)
+
+
+class P2PFLTrustClient(P2PClient):
+    """
+    Simulation of a P2P Client with trust scores in FL.
+    """
+    def __init__(self, client_id, model, dataset, indices, device, apply_penalties=False):
+        super().__init__(client_id, model, dataset, indices, device)
+        self.prev_params = None  
+        self.trust_history = defaultdict(list)
+        self.apply_penalties = apply_penalties
+
+    def aggregate_models(self, peer_clients, weights):
+        """
+        Aggregate models from peers using cosine similarity-based trust scores.
+        """
+        # Compute local model update
+        local_init = {k: p.clone().detach() for k, p in zip(self.model.state_dict().keys(), self.prev_params)}
+        local_final = self.model.state_dict()
+        local_update_norm = Client.state_dict_update_norm(local_init, local_final)
+
+        trust_scores = {}
+        normalized_peer_models = {}
+
+        for pid, peer in peer_clients.items():
+            # Compute peer model update
+            peer_init = {k: p.clone().detach() for k, p in zip(peer.model.state_dict().keys(), peer.prev_params)}
+            peer_final = peer.model.state_dict()
+
+            # Guard against NaN values
+            if any(torch.isnan(v).any() for v in peer_final.values()):
+                print(f"Client {self.id} detected NaN in peer {pid}'s model, skipping.")
+                trust_scores[pid] = 0.0
+                continue
+
+            # Compute cosine similarity between updates
+            cosine_sim = Client.state_dict_cosine_sim(local_final, peer_final)
+            if math.isnan(cosine_sim):
+                print(f"Client {self.id} skipping peer {pid} due to NaN cosine similarity.")
+                continue
+
+            # Normalize peer update to match local update norm (FLTrust)
+            normed_peer_model, scale = Client.state_dict_normalize(peer_init, peer_final, local_update_norm)
+
+            # Reject updates that are misaligned or too large
+            if cosine_sim < TRUST_ANGLE_THRESHOLD or scale > SCALE_UPPER_LIMIT:
+                print(f"Client {self.id} rejected peer {pid}: cosine_sim={cosine_sim:.4f}, scale={scale:.4f}")
+                trust_scores[pid] = 0.0
+                continue
+
+            trust_score = max(0.0, cosine_sim)
+            trust_scores[pid] = trust_score
+
+            # Apply penalty for repeated low trust
+            if self.apply_penalties:
+                low_count = sum(1 for s in self.trust_history[pid] if s < LOW_TRUST_SCORE)
+                if low_count >= LOW_TRUST_COUNT_THRESHOLD:
+                    print(f"Client {self.id} penalizing peer {pid} for low trust.")
+                    trust_score *= LOW_TRUST_PENALTY
+                    trust_scores[pid] = trust_score
+
+            self.trust_history[pid].append(trust_score)
+            normalized_peer_models[pid] = normed_peer_model
+
+        # Weighted aggregation using trust scores
+        total_trust = sum(trust_scores.values())
+        if total_trust < 1e-10:
+            print(f"Client {self.id} skipping aggregation (total trust weight too small).")
+            return
+
+        update_sum = {k: torch.zeros_like(v) for k, v in self.model.state_dict().items()}
+        for pid, peer_model in normalized_peer_models.items():
+            ts = trust_scores[pid]
+            for k in update_sum:
+                update_sum[k] += ts * (peer_model[k] - self.model.state_dict()[k])
+
+        for k in self.model.state_dict().keys():
+            self.model.state_dict()[k].add_(update_sum[k] / total_trust)
+
+class MaliciousP2PFLTrustClient(P2PFLTrustClient):
+    """"
+    Simulation of a malicious client in a federated learning.
+    This client injects attacks during model training.
+    """
+    def __init__(self, client_id, model, dataset, indices, device):
+        super().__init__(client_id, model, dataset, indices, device)
+
+    def train(self, epochs=1, lr=0.01):
+        self.model.train()
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=lr)
+        for _ in range(epochs):
+            for x, y in self.train_data:
+                x, y = x.to(self.device), y.to(self.device)
+                optimizer.zero_grad()
+                output = self.model(x)
+                loss = F.cross_entropy(output, y)
+                # Basic attack: reverse the gradient for malicious behavior
+                loss.backward()
+                optimizer.step()
+
+        # Dummy attack: arbitrarily scale model parameters (malicious update)
+        with torch.no_grad():
+            for p in self.model.parameters():
+                p.data *= 5.0  # exaggerate the model weights
+            return self.model.state_dict()
+    
+
+class Backdoor(P2PFLTrustClient):
 
     def __init__(self, client_id, model, dataset, indices, device, trigger_pattern = [[-.42, -.42, -.42, -.42, -.42], 
                                                                                       [-.42, 2.80, 2.80, 2.80, -.42], 
@@ -194,9 +364,10 @@ class Backdoor(Client):
         print(f"Backdoor update norm: {Client.state_dict_update_norm(initial_state, self.model.state_dict())}") 
 
         return self.model.state_dict()
+      
 
 
-class LabelFlipping(Client):
+class LabelFlipping(P2PFLTrustClient):
     #                                                                         {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
     def __init__(self, client_id, model, dataset, indices, device, labelmap = [8, 1, 5, 8, 1, 5, 8, 1, 8, 8]):
         super().__init__(client_id, model, dataset, indices, device)
@@ -236,8 +407,8 @@ class LabelFlipping(Client):
 # Gradient and model updates are normalized to prevent NaN values from appearing
 # For a large round count, NaN values can still appear. 
 # This happens due to the legitimate algorithm breaking with large values. 
-class GradientAscent(Client):
-    def __init__(self, client_id, model, dataset, indices, device, mal_angle = 0):
+class GradientAscent(P2PFLTrustClient):
+    def __init__(self, client_id, model, dataset, indices, device, mal_angle = 10):
         super().__init__(client_id, model, dataset, indices, device)
         self.mal_angle = mal_angle * math.pi / 180
 
@@ -319,7 +490,7 @@ class GradientAscent(Client):
 # Gradient ascent without the normalization
 # Breaks model because model parameters blow up while training batches. This is why normalization is needed in the code above
 # Not good because too obvious, sending nan parameters to central server as a malicious update is boring
-class GradientAscentNoScale(Client):
+class GradientAscentNoScale(P2PFLTrustClient):
     def __init__(self, client_id, model, dataset, indices, device):
         super().__init__(client_id, model, dataset, indices, device)
 
@@ -350,7 +521,7 @@ class GradientAscentNoScale(Client):
         return self.model.state_dict()
 
 # Flips the model update in the opposite direction
-class SignFlipping(Client):
+class SignFlipping(P2PFLTrustClient):
     def __init__(self, client_id, model, dataset, indices, device):
         super().__init__(client_id, model, dataset, indices, device)
 
@@ -380,28 +551,3 @@ class SignFlipping(Client):
 
         return flipped_state
 
-
-
-class MaliciousClient(Client):
-    """"
-    Simulation of a malicious client in a federated learning.
-    This client injects attacks during model training.
-    """
-    def __init__(self, client_id, model, dataset, indices, device):
-        super().__init__(client_id, model, dataset, indices, device)
-
-    def train(self, epochs=1, lr=0.01):
-        self.model.train()
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=lr)
-        for _ in range(epochs):
-            for x, y in self.train_data:
-                x, y = x.to(self.device), y.to(self.device)
-                optimizer.zero_grad()
-                output = self.model(x)
-                loss = F.cross_entropy(output, y)
-                # Basic attack: reverse the gradient for malicious behavior
-                # TODO: Implement an attack class for more complex attacks
-                loss = -loss 
-                loss.backward()
-                optimizer.step()
-        return self.model.state_dict()
