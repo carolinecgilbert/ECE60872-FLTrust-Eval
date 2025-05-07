@@ -230,6 +230,9 @@ class P2PFLTrustClient(P2PClient):
         for p, new in zip(self.model.parameters(), new_params):
             p.data.copy_(new)
 
+        for pid, peer in peer_clients.items():
+            self.trust_history[pid].append(1.0)
+
     def aggregate_models(self, peer_clients, weights):
         """
         Aggregate models from peers using cosine similarity-based trust scores.
