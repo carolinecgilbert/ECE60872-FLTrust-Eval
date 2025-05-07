@@ -65,7 +65,7 @@ if __name__ == "__main__":
     model = CNN()
     for i, idxs in enumerate(client_indices):
         if i < num_malicious:
-            clients.append(Backdoor(i, copy.deepcopy(model), train_dataset, idxs, device))
+            clients.append(SignFlipping(i, copy.deepcopy(model), train_dataset, idxs, device))
         else:
             clients.append(P2PFLTrustClient(i, copy.deepcopy(model), train_dataset, idxs, device))
 

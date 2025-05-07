@@ -216,6 +216,20 @@ class P2PFLTrustClient(P2PClient):
         self.trust_history = defaultdict(list)
         self.apply_penalties = apply_penalties
 
+    def aggregate_models_avg(self, peer_clients, weights):
+        """
+        Aggregate models using average
+        """
+        new_params = [torch.zeros_like(p) for p in self.model.parameters()]
+
+        weight = 1 / len(peer_clients)
+        for peer_id, peer in peer_clients.items():
+            for i, param in enumerate(peer.model.parameters()):
+                new_params[i] += weight * param.data
+
+        for p, new in zip(self.model.parameters(), new_params):
+            p.data.copy_(new)
+
     def aggregate_models(self, peer_clients, weights):
         """
         Aggregate models from peers using cosine similarity-based trust scores.
@@ -491,6 +505,7 @@ class GradientAscent(P2PFLTrustClient):
 
             # Return honest update if mal update has nan
             if (torch.isnan(torch.tensor(scale))):
+                self.model.load_state_dict(honest_state)
                 return honest_state
             # If honest update is larger than malicious update, don't upscale malicious update
             if (scale > 1):
@@ -498,45 +513,16 @@ class GradientAscent(P2PFLTrustClient):
             else:    
                 for k in norm_state.keys():
                     if (torch.isnan(norm_state[k]).any()):
+                        self.model.load_state_dict(honest_state)
                         return honest_state
+                self.model.load_state_dict(norm_state)
                 return norm_state
         # If set cosine angle, normalize magniude and modify angle
         else: 
-            return Client.state_dict_rotate(initial_state, honest_state, mal_state, self.mal_angle)
+            sd = Client.state_dict_rotate(initial_state, honest_state, mal_state, self.mal_angle)
+            self.model.load_state_dict(sd)
+            return sd
 
-    
-# Gradient ascent without the normalization
-# Breaks model because model parameters blow up while training batches. This is why normalization is needed in the code above
-# Not good because too obvious, sending nan parameters to central server as a malicious update is boring
-class GradientAscentNoScale(P2PFLTrustClient):
-    def __init__(self, client_id, model, dataset, indices, device):
-        super().__init__(client_id, model, dataset, indices, device)
-
-    def train(self, epochs=1, lr=0.01):
-        self.model.train()
-
-        # Save given model to calculate negative update later
-        initial_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=lr)
-        for epoch in range(epochs):
-            for batch_idx, (x, y) in enumerate(self.train_data):
-                x, y = x.to(self.device), y.to(self.device)
-                optimizer.zero_grad()
-                output = self.model(x)
-                loss = F.cross_entropy(output, y)
-                loss.backward()
-
-                # Negate gradients for gradient ascent
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        param.grad *= -1
-
-                optimizer.step()
-
-        print(f"GradientAscent model update norm: {Client.state_dict_update_norm(initial_state, self.model.state_dict())}") 
-        
-        return self.model.state_dict()
 
 # Flips the model update in the opposite direction
 class SignFlipping(P2PFLTrustClient):
@@ -567,5 +553,7 @@ class SignFlipping(P2PFLTrustClient):
 
         print(f"SignFlipping model update norm: {Client.state_dict_update_norm(initial_state, flipped_state)}") 
 
+        # Copy updated parameters to client's model
+        self.model.load_state_dict(flipped_state)
         return flipped_state
 
