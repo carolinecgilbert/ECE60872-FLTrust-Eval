@@ -193,15 +193,18 @@ class P2PClient(Client):
                 for param, old_param in zip(peer.model.parameters(), peer.prev_params)]
 
 
-    def aggregate_models(self, peer_models, weights):
+    def aggregate_models(self, peer_clients, weights):
         """
         Aggregate models from peers using a weighted sum.
         """
         new_params = [torch.zeros_like(p) for p in self.model.parameters()]
-        for peer_id, peer_model in peer_models.items():
-            w = weights[peer_id]
-            for i, param in enumerate(peer_model.parameters()):
+
+        for peer_id, peer in peer_clients.items():
+            w = weights.get(peer_id, 0.0)
+            for i, param in enumerate(peer.model.parameters()):
                 new_params[i] += w * param.data
+
+        # Assign new parameters to the local model
         for p, new in zip(self.model.parameters(), new_params):
             p.data.copy_(new)
 
@@ -215,8 +218,23 @@ class P2PFLTrustClient(P2PClient):
         self.prev_params = None  
         self.trust_history = defaultdict(list)
         self.apply_penalties = apply_penalties
-
+    
     def aggregate_models(self, peer_clients, weights):
+        """
+        Aggregate models from peers using a weighted sum.
+        """
+        new_params = [torch.zeros_like(p) for p in self.model.parameters()]
+
+        for peer_id, peer in peer_clients.items():
+            w = weights.get(peer_id, 0.0)
+            for i, param in enumerate(peer.model.parameters()):
+                new_params[i] += w * param.data
+
+        # Assign new parameters to the local model
+        for p, new in zip(self.model.parameters(), new_params):
+            p.data.copy_(new)
+
+    def aggregate_models_fltrust(self, peer_clients):
         """
         Aggregate models from peers using cosine similarity-based trust scores.
         """
@@ -426,7 +444,7 @@ class LabelFlipping(P2PFLTrustClient):
 # For a large round count, NaN values can still appear. 
 # This happens due to the legitimate algorithm breaking with large values. 
 class GradientAscent(P2PFLTrustClient):
-    def __init__(self, client_id, model, dataset, indices, device, mal_angle = 10):
+    def __init__(self, client_id, model, dataset, indices, device, mal_angle = 30):
         super().__init__(client_id, model, dataset, indices, device)
         self.mal_angle = mal_angle * math.pi / 180
 

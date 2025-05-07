@@ -151,6 +151,31 @@ class P2PServer():
         accuracy = 100 * correct / total
         print(f"Test Accuracy: {accuracy:.2f}%")
         return accuracy
+    
+    def aggregate_models(self):
+        """
+        Aggregate models using averaging.
+        """
+        client_models = [client.model.state_dict() for client in self.clients]
+        keys = client_models[0].keys()
+
+        avg_model = {}
+        num_clients = len(client_models)
+
+        for k in keys:
+            avg_model[k] = sum(model[k] for model in client_models) / num_clients
+
+        self.model.load_state_dict(avg_model)
+
+class P2PFLTrustServer(P2PServer):
+    """
+    P2P Federated Learning Server to aggregate model updates from clients
+    using FL trust.
+    """
+    def __init__(self, clients, model, device):
+        self.clients = clients
+        self.model = model.to(device)
+        self.device = device
 
     def compute_final_trust_scores(self):
         """
@@ -181,7 +206,7 @@ class P2PServer():
         sorted_clients = sorted(self.clients, key=lambda c: final_scores.get(c.id, 0), reverse=True)
         return sorted_clients[:num_selected]
     
-    def aggregate_trusted_models(self):
+    def aggregate_models(self):
         """
         Given a list of trusted clients and their final models,
         check consensus and average the models weighted by trust.
